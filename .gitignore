@@ -9,6 +9,8 @@ dist/
 *.log
 .DS_Store
 .claude/
+.claude-session.pid
+logs/
 
 plugin/scripts/*.map
 plugin/scripts/*.d.mts
