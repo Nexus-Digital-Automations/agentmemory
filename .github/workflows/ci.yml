@@ -62,7 +62,15 @@ jobs:
       # Two-step install: generate a lockfile in-runner with
       # --package-lock-only, then install from it with `npm ci`.
       # Lockfiles are gitignored at the repo level.
+      # `shell: bash` makes Windows runners use Git-Bash instead of
+      # cmd.exe so the build script's POSIX idioms (`cp ... 2>/dev/null
+      # || true`, `mkdir -p`) work cross-platform. ubuntu / macos
+      # already default to bash.
       - run: npm install --package-lock-only --legacy-peer-deps --no-audit --no-fund
+        shell: bash
       - run: npm ci --legacy-peer-deps --no-audit --no-fund
+        shell: bash
       - run: npm run build
+        shell: bash
       - run: npm test
+        shell: bash
