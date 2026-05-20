@@ -26,6 +26,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as p from "@clack/prompts";
 import { writePrefs } from "./preferences.js";
+import { resolveAdapter, runAdapter } from "./connect/index.js";
+import type { ConnectResult } from "./connect/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -135,7 +137,31 @@ export interface OnboardingResult {
   provider: string | null;
 }
 
+function shouldSkipInteractiveOnboarding(): boolean {
+  const ci = process.env["CI"];
+  return (
+    process.stdin.isTTY !== true ||
+    process.stdout.isTTY !== true ||
+    (ci !== undefined && ci !== "" && ci !== "0" && ci.toLowerCase() !== "false")
+  );
+}
+
+function writeDefaultOnboardingPrefs(): OnboardingResult {
+  writePrefs({
+    lastAgent: null,
+    lastAgents: [],
+    lastProvider: null,
+    skipSplash: true,
+    firstRunAt: new Date().toISOString(),
+  });
+  return { agents: [], provider: null };
+}
+
 export async function runOnboarding(): Promise<OnboardingResult> {
+  if (shouldSkipInteractiveOnboarding()) {
+    return writeDefaultOnboardingPrefs();
+  }
+
   p.note(
     [
       "Welcome to agentmemory.",
@@ -156,6 +182,18 @@ export async function runOnboarding(): Promise<OnboardingResult> {
   if (p.isCancel(agentsPicked)) {
     p.cancel("Setup cancelled. Re-run any time with: agentmemory --reset");
     process.exit(0);
+  }
+
+  const pickedAgentsList = (agentsPicked as string[]) ?? [];
+  if (pickedAgentsList.length > 0) {
+    p.note(
+      [
+        "━ how this works ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "All selected agents share the same memory at :3111.",
+        "A memory saved by Claude Code is visible to Codex + Cursor instantly.",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+      ].join("\n"),
+    );
   }
 
   const providerPicked = await p.select<string>({
@@ -198,5 +236,77 @@ export async function runOnboarding(): Promise<OnboardingResult> {
   }
   p.note(lines.join("\n"), "ready");
 
+  if (agents.length > 0) {
+    await wireSelectedAgents(agents);
+  }
+
   return { agents, provider };
+}
+
+async function wireSelectedAgents(agents: string[]): Promise<void> {
+  p.note("Wire selected agents now?", "next step");
+  const confirmed = await p.confirm({
+    message: "Run `agentmemory connect <agent>` for each selected agent now? [Y/n]",
+    initialValue: true,
+  });
+
+  if (p.isCancel(confirmed) || confirmed === false) {
+    const cmds = agents.map((a) => `  agentmemory connect ${a}`);
+    p.note(["Wire later with:", ...cmds].join("\n"), "later");
+    return;
+  }
+
+  const wired: string[] = [];
+  const manual: { name: string; docs?: string }[] = [];
+  const failed: { name: string; reason: string }[] = [];
+
+  for (const name of agents) {
+    const adapter = resolveAdapter(name);
+    if (!adapter) {
+      failed.push({ name, reason: "no adapter available" });
+      p.log.warn(`Wiring ${name}… no adapter available (skipped).`);
+      continue;
+    }
+    p.log.step(`Wiring ${name}...`);
+    let result: ConnectResult;
+    try {
+      result = await runAdapter(adapter, { dryRun: false, force: false });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      failed.push({ name, reason });
+      p.log.error(`${name}: ${reason}`);
+      continue;
+    }
+    switch (result.kind) {
+      case "installed":
+      case "already-wired":
+        wired.push(name);
+        break;
+      case "stub":
+        manual.push({ name, docs: adapter.docs });
+        break;
+      case "skipped":
+        failed.push({ name, reason: result.reason });
+        break;
+    }
+  }
+
+  const summary: string[] = [];
+  if (wired.length > 0) {
+    summary.push(`Wired: ${wired.join(", ")}.`);
+  }
+  if (manual.length > 0 || failed.length > 0) {
+    const parts: string[] = [];
+    for (const m of manual) {
+      parts.push(`${m.name} (manual install required${m.docs ? ` — see ${m.docs}` : ""})`);
+    }
+    for (const f of failed) {
+      parts.push(`${f.name} (${f.reason})`);
+    }
+    summary.push(`Skipped/failed: ${parts.join(", ")}.`);
+  }
+  if (summary.length === 0) {
+    summary.push("No agents were wired.");
+  }
+  p.note(summary.join("\n"), "wire summary");
 }

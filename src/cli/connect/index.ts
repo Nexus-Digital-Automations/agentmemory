@@ -49,7 +49,7 @@ function parseFlags(args: string[]): {
   return { dryRun, force, all, positional };
 }
 
-async function runAdapter(
+export async function runAdapter(
   adapter: ConnectAdapter,
   opts: ConnectOptions,
 ): Promise<ConnectResult> {
@@ -60,6 +60,9 @@ async function runAdapter(
     return { kind: "skipped", reason: "not-detected" };
   }
   p.log.step(`Wiring ${adapter.displayName}…`);
+  if (adapter.protocolNote) {
+    p.log.message(adapter.protocolNote);
+  }
   try {
     return await adapter.install(opts);
   } catch (err) {

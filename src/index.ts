@@ -11,6 +11,7 @@ import {
   isAutoCompressEnabled,
   isConsolidationEnabled,
   isContextInjectionEnabled,
+  isDropStaleIndexEnabled,
 } from "./config.js";
 import {
   createProvider,
@@ -169,6 +170,18 @@ async function main() {
       serviceName: OTEL_CONFIG.serviceName,
       serviceVersion: OTEL_CONFIG.serviceVersion,
       metricsExportIntervalMs: OTEL_CONFIG.metricsExportIntervalMs,
+    },
+    // Explicit worker telemetry metadata. iii-sdk falls back to
+    // auto-detection (cwd / package.json name / hostname) when this
+    // is omitted, which produces inconsistent values per host —
+    // `agentmemory`, `node`, `npm`, occasionally the user's home
+    // directory basename. Pinning the value here gives every install
+    // the same stable project identifier for downstream attribution
+    // and grouping in the engine's metrics + traces output.
+    telemetry: {
+      project_name: "agentmemory",
+      language: "node",
+      framework: "iii-sdk",
     },
   });
 
@@ -364,8 +377,7 @@ async function main() {
         .map((m) => `${m.obsId} (dim=${m.dim})`)
         .join(", ");
       const distinct = Array.from(seenDimensions).sort((a, b) => a - b).join(", ");
-      const dropStale =
-        process.env["AGENTMEMORY_DROP_STALE_INDEX"] === "true";
+      const dropStale = isDropStaleIndexEnabled();
       if (dropStale) {
         console.warn(
           `[agentmemory] Persisted vector index has ${mismatches.length} of ` +
@@ -400,16 +412,24 @@ async function main() {
   const needsRebuild = bm25Index.size === 0;
 
   if (needsRebuild) {
-    const indexCount = await rebuildIndex(kv).catch((err) => {
-      console.warn(`[agentmemory] Failed to rebuild search index:`, err);
-      return 0;
-    });
-    if (indexCount > 0) {
-      bootLog(
-        `Search index rebuilt: ${indexCount} entries`,
-      );
-      indexPersistence.scheduleSave();
-    }
+    // Fire-and-forget. rebuildIndex iterates every observation across
+    // every session and AWAITS an embedding-provider call per record.
+    // On a large corpus + rate-limited embedding endpoint that can
+    // take HOURS; awaiting it here blocks every subsequent boot step
+    // (including startViewerServer below, leaving the viewer port
+    // unbound for the duration). The index lazily fills in over time
+    // and search degrades gracefully — partial coverage > no viewer
+    // for hours. Errors still surface via the inner .catch.
+    void rebuildIndex(kv)
+      .then((indexCount) => {
+        if (indexCount > 0) {
+          bootLog(`Search index rebuilt: ${indexCount} entries`);
+          indexPersistence.scheduleSave();
+        }
+      })
+      .catch((err) => {
+        console.warn(`[agentmemory] Failed to rebuild search index:`, err);
+      });
   } else {
     // Backfill memories into BM25 for users upgrading from <0.9.5: prior
     // versions of mem::remember never indexed memories, so the persisted
@@ -461,7 +481,10 @@ async function main() {
     `Ready. ${embeddingProvider ? "Triple-stream (BM25+Vector+Graph)" : "BM25+Graph"} search active.`,
   );
   bootLog(
-    `Endpoints: 107 REST + ${getAllTools().length} MCP tools + 6 MCP resources + 3 MCP prompts`,
+    `REST API: 124 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
+  );
+  bootLog(
+    `MCP surface (opt-in via \`npx @agentmemory/mcp\`): ${getAllTools().length} tools · 6 resources · 3 prompts`,
   );
 
   const viewerPort = config.restPort + 2;
