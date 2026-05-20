@@ -62,15 +62,17 @@ jobs:
       # Two-step install: generate a lockfile in-runner with
       # --package-lock-only, then install from it with `npm ci`.
       # Lockfiles are gitignored at the repo level.
-      # `shell: bash` makes Windows runners use Git-Bash instead of
-      # cmd.exe so the build script's POSIX idioms (`cp ... 2>/dev/null
-      # || true`, `mkdir -p`) work cross-platform. ubuntu / macos
-      # already default to bash.
+      # On Windows, `npm run` spawns scripts in `cmd.exe` by default,
+      # which can't parse the build script's POSIX idioms (`cp ...
+      # 2>/dev/null || true`, `mkdir -p`). Pointing npm at Git-Bash
+      # (preinstalled on GitHub-hosted Windows runners) makes
+      # `npm run build` and `npm run test` use the same shell as
+      # ubuntu / macos.
+      - if: runner.os == 'Windows'
+        run: npm config set script-shell "C:\\Program Files\\Git\\bin\\bash.exe"
+        shell: bash
+
       - run: npm install --package-lock-only --legacy-peer-deps --no-audit --no-fund
-        shell: bash
       - run: npm ci --legacy-peer-deps --no-audit --no-fund
-        shell: bash
       - run: npm run build
-        shell: bash
       - run: npm test
-        shell: bash
